@@ -60,8 +60,8 @@ npm install
 ### 2. Configure Environment Variables
 Create a `.env` file in the root directory:
 ```env
-DATABASE_URL="postgresql://neondb_owner:npg_TedI8jn6fGmZ@ep-young-meadow-ao9x75fw.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require"
-JWT_SECRET="use-a-secure-random-32-character-secret-key"
+DATABASE_URL="postgresql://username:password@hostname:port/dbname?sslmode=require"
+JWT_SECRET="your-32-character-secure-jwt-secret"
 ```
 
 ### 3. Sync Database & Run Migrations
