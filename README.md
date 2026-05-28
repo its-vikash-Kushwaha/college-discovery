@@ -1,167 +1,96 @@
-# CollegeDiscover 🎓
-> A production-grade MVP for a College Discovery, Compare, and Decision-Making Platform built with a robust, scalable backend architecture.
+# College Discovery Backend
+
+This repository contains the backend and database architecture for the College Discovery and Compare platform. It is built as a Next.js application using Prisma ORM connected to a PostgreSQL database.
 
 ---
 
-## 📖 Project Overview & Description
+## Technical Stack
 
-**CollegeDiscover** is a high-fidelity full-stack MVP designed to solve a critical product challenge: helping students navigate the highly stressful process of researching, comparing, and deciding on colleges. Unlike generic marketplaces, CollegeDiscover is built as a production-grade directory focused on **relational integrity, query performance, and user-scoped data protection**.
-
-Students can search across premier Indian institutes, filter colleges by average tuition fees and location states, visualize placement timelines (highest package vs. average package), write detailed reviews, side-by-side compare multiple colleges, and bookmark favorites to their watchlist securely.
+* **Framework:** Next.js (App Router Route Handlers)
+* **Database ORM:** Prisma
+* **Database Engine:** PostgreSQL (Neon Serverless)
+* **Authentication:** JWT-based session security via `jose` (Edge-compatible)
+* **Security:** Password salting and hashing via `bcryptjs`
 
 ---
 
-## 🛠️ Backend Architecture & System Design
+## Database Design & Relational Integrity
 
-Our backend is designed with a focus on data safety, low-latency querying, and robust relational isolation. It utilizes a **Next.js App Router API Handler** model connected to a **PostgreSQL** database (hosted on Neon) through **Prisma ORM**.
+The relational database is normalized and structured to enforce strict data constraints at the database engine level:
 
-```
-                           ┌─────────────────────────┐
-                           │      Client Browser     │
-                           └───────────┬─────────────┘
-                                       │
-                        HTTP Requests  │ (Reads JWT Session Cookie)
-                                       ▼
-                     ┌───────────────────────────────────┐
-                     │ Next.js App Router Route Handlers │
-                     └─────────────────┬─────────────────┘
-                                       │
-                        Prisma Queries │ (Connection Pool)
-                                       ▼
-                       ┌──────────────────────────────┐
-                       │   PostgreSQL Database (Neon) │
-                       └──────────────────────────────┘
-```
-
-### 1. Database Schema & Relational Integrity (`prisma/schema.prisma`)
-The PostgreSQL database is structured in Third Normal Form (3NF) to eliminate reduncancy while maintaining cascading integrity:
-
-* **Compound Watchlist Index**: The `SavedCollege` join table maps users to bookmarked colleges. We enforce a compound unique index:
+* **Watchlist Compound Key:** To prevent duplicate bookmarks, the `SavedCollege` table enforces a composite unique constraint on `[userId, collegeId]`:
   ```prisma
   @@unique([userId, collegeId])
   ```
-  This guarantees database-level integrity, preventing a user from duplicating bookmarks and optimizing indexing speed.
-* **Cascade Deletes**: Foreign key relations are linked with `onDelete: Cascade`. Deleting a `College` automatically purges associated courses, placements, and reviews, avoiding orphaned rows.
-* **Optimal Field Types**: Average tuition fees are stored as `Int` to avoid floating-point errors in SQL budget calculations. Package trends (LPA) and aggregate scores use `Float` for precise fractions.
+* **Referential Action (Cascading Deletes):** Foreign key relationships use `onDelete: Cascade`. Deleting a `College` automatically cleans up its dependent `Course`, `Placement`, and `Review` records to avoid orphaned rows.
+* **Optimized Ratings Cache:** Reviews use transaction-scoped writes. When a review is posted, the backend calculates the average rating across all reviews for that college and caches it on the `College` model's `rating` field. This eliminates the need for expensive JOIN queries during paginated list views.
 
 ---
 
-### 2. Search, Filtering, and Paginated Query Engine
-The primary explore directory handler `/api/colleges` is a high-performance query builder:
-- **ILIKE Pattern Searching**: Leverages Prisma's `mode: 'insensitive'` to compile Postgres `ILIKE` queries, matching keywords against names, states, or locations dynamically.
-- **Multi-Value States Lookup**: Splits comma-separated strings (e.g. `state=Delhi,Karnataka`) into array-based queries `state: { in: states, mode: 'insensitive' }`.
-- **Atomic Pagination Transactions**: To prevent pagination sync errors, listings execute the search query and total count matching the active criteria in a single database `$transaction` block:
-  ```typescript
-  const [colleges, totalCount] = await prisma.$transaction([
-    prisma.college.findMany({ where, orderBy, skip, take: limit, ... }),
-    prisma.college.count({ where }),
-  ]);
-  ```
+## Core API Endpoints
+
+All API endpoints return JSON payloads. Authentication is managed via secure, HTTP-only JWT cookies (`session_token`).
+
+### Authentication
+* `POST /api/auth/signup` - Registers a new user account.
+* `POST /api/auth/login` - Authenticates credentials and sets the session cookie.
+* `GET /api/auth/me` - Verifies session status and returns active user info.
+* `DELETE /api/auth/me` - Clears the session cookie (logout).
+
+### Colleges Directory
+* `GET /api/colleges` - Query directory supporting pagination (`page`, `limit`), case-insensitive pattern matching (`query`), multiple state filters (`state`), fee limits (`maxFees`), and sorting parameters (`sortBy=fees_asc|fees_desc|rating_desc`).
+* `GET /api/colleges/[id]` - Retrieves detail profile for a single college, including placements and course list.
+
+### Watchlists & Reviews (Authenticated)
+* `GET /api/saved` - Fetches the authenticated user's bookmarked watchlist.
+* `POST /api/saved` - Toggles the bookmark status for a college (adds or removes).
+* `POST /api/colleges/[id]/reviews` - Submits a review and updates the college's overall aggregate rating cache.
 
 ---
 
-### 3. Custom Cookie-Based JWT Session Security
-We engineered a custom lightweight edge-compliant token security suite without using heavy third-party packages:
-- **Cryptographic Hashing**: User passwords are salted and hashed using `bcryptjs` (salt index `10`) before writing to the database.
-- **Edge-Ready Cryptography (`jose`)**: Decodes and signs HS256 tokens using the Web Crypto API, fully compatible with Next.js Serverless and Edge runtimes.
-- **XSS Token Safeguards**: Session tokens are written directly to HTTP-only cookies (`session_token`) with `sameSite: 'strict'` configuration. This secures tokens from browser JavaScript reading, completely neutralizing XSS extraction.
-- **Relational Data Protection**: Scopes all watchlist bookmarks (`/api/saved`) strictly to the resolved token `userId` payload, responding with `401 Unauthorized` for expired or invalid cookies.
+## Local Setup
 
----
-
-### 4. Input Validations & Transactional Aggregations
-When users submit feedback for a college, the API maintains consistent aggregates through sequential transaction-style writes:
-1. **Strict Input Boundaries**: Ratings must be Float values between `1.0` and `5.0` with non-empty review messages.
-2. **Relational Review Creation**: Inserts the review linked to the author's `userId`.
-3. **Database Aggregation**: Aggregates the reviews for the college using the `_avg` database operator:
-   ```typescript
-   const aggregates = await prisma.review.aggregate({
-     where: { collegeId },
-     _avg: { rating: true },
-   });
-   ```
-4. **Normalized Rating Cache**: The average is rounded to 1 decimal place and cached on the `College` model `rating` field. This prevents high-overhead JOIN calculations during listings directories queries.
-
----
-
-## 📊 Database Schema Relationships
-
-```
-                  ┌──────────────┐
-                  │     User     │
-                  └──────┬───────┘
-                         │ 1
-                         │
-             ┌───────────┴───────────┐
-             │1:N                    │1:N
-     ┌───────▼──────┐        ┌───────▼──────┐
-     │ SavedCollege │        │    Review    │
-     └───────▲──────┘        └───────▲──────┘
-             │N:1                    │N:1
-             │                       │
-             │           1           │
-             ├───────────────────────┤
-             │                       │
-      ┌──────┴──────┐         ┌──────┴──────┐
-      │   College   ◄─────────┤   Course    │
-      └──────▲──────┘1      N └─────────────┘
-             │1
-             │
-             │N
-      ┌──────┴──────┐
-      │  Placement  │
-      └─────────────┘
-```
-
----
-
-## 🔌 API Routes Reference
-
-Our API is fully RESTful and guarantees standardized JSON error schemas across endpoints:
-
-| Endpoint | Method | Function | Payload / Queries | Auth Required |
-| :--- | :--- | :--- | :--- | :--- |
-| `/api/colleges` | `GET` | Paginated search & multi-filtering directory. | `query`, `state`, `minRating`, `maxFees`, `sortBy`, `page`, `limit` | No |
-| `/api/colleges/[id]` | `GET` | Relational profiles lookup and bookmark check. | Dynamic route parameters | No |
-| `/api/colleges/[id]/reviews` | `POST` | Validates, submits review and updates college overall rating. | `{ rating: number, comment: string }` | **Yes** |
-| `/api/saved` | `GET` | Fetches private bookmarked watchlists. | None (Session Cookie) | **Yes** |
-| `/api/saved` | `POST` | Toggles bookmark watchlist status. | `{ collegeId: string }` | **Yes** |
-| `/api/auth/signup` | `POST` | Registers user and issues secure JWT cookie. | `{ name, email, password }` | No |
-| `/api/auth/login` | `POST` | Validates credentials and issues secure JWT cookie. | `{ email, password }` | No |
-| `/api/auth/me` | `GET` | Resolves active session username from cookie. | None | No |
-| `/api/auth/me` | `DELETE` | Clears cookies to log user out. | None | No |
-
----
-
-## 💻 Local Setup & Development
-
-### 1. Clone the repository
+### 1. Clone & Install Dependencies
 ```bash
 git clone https://github.com/its-vikash-Kushwaha/college-discovery.git
 cd college-discovery
-```
-
-### 2. Install dependencies
-```bash
 npm install
 ```
 
-### 3. Setup environment variables
+### 2. Configure Environment Variables
 Create a `.env` file in the root directory:
 ```env
 DATABASE_URL="postgresql://neondb_owner:npg_TedI8jn6fGmZ@ep-young-meadow-ao9x75fw.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require"
-JWT_SECRET="generate-a-secure-secret-key-at-least-32-chars-long"
+JWT_SECRET="use-a-secure-random-32-character-secret-key"
 ```
 
-### 4. Sync Prisma schema & Seed database
-Push the relational schema models directly to your Neon database and load mock Indian colleges data:
+### 3. Sync Database & Run Migrations
+Generate the Prisma Client binaries locally and apply the relational schema to the database:
 ```bash
 npx prisma db push
+```
+
+### 4. Seed Mock Data
+Load the relational mock dataset of premier Indian institutions, placement statistics, course details, and initial reviews:
+```bash
 npx prisma db seed
 ```
 
-### 5. Boot the development server
+### 5. Start the Development Server
 ```bash
 npm run dev
 ```
-Open [http://localhost:3000](http://localhost:3000) to see the result!
+The application will boot locally at `http://localhost:3000`.
+
+---
+
+## Vercel Deployment Configurations
+
+For serverless deployments (e.g. Vercel), standard file tracing is configured using `prisma-client-js`. Ensure your build commands are set to generate the client prior to compiling the Next.js build:
+
+```json
+"scripts": {
+  "build": "prisma generate && next build"
+}
+```
+In your production environment, ensure that `DATABASE_URL` and `JWT_SECRET` are correctly populated under the project settings.
